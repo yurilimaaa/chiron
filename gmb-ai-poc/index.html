@@ -1,0 +1,409 @@
+<!--  > npx serve .   -->
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Getmyboat — AI Search POC</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="wrap">
+   
+
+    <div class="panel">
+         <div class="logo"><img src="gmb.png" alt="Getmyboat logo">BETA</div>
+      <div class="row no-sep">
+        <div class="input">
+          <input id="loc" type="text" placeholder="Where to?" autocomplete="off" />
+        </div>
+      </div>
+
+      <div class="row no-sep">
+        <div class="input">
+          <div class="inline">
+            <input id="prompt" type="text" placeholder="When, how, with who would you like to go boating?" autocomplete="off" />
+            <button class="btn icon" id="run" aria-label="Search">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="11" cy="11" r="7"></circle>
+                <line x1="20" y1="20" x2="16.65" y2="16.65"></line>
+              </svg>
+            </button>
+          </div>
+          <div class="chips" id="chips"></div>
+        </div>
+      </div>
+
+      <div class="preview">
+        <div>
+          <div class="muted" style="margin-bottom:6px">Final URL</div>
+          <div class="urlbox">
+            <input id="finalUrl" readonly />
+            <button class="btn" id="copyUrl" style="padding:8px 12px">Copy</button>
+            <button class="btn" id="openUrl" style="opacity:.9;display:none">Open URL</button>
+          </div>
+          <div style="margin-top:12px">
+            <div class="muted" style="margin-bottom:6px">Query params</div>
+            <pre id="qsBox">(empty)</pre>
+          </div>
+          <div style="margin-top:12px">
+            <div class="muted" style="margin-bottom:6px">Diagnostics</div>
+            <pre id="diag">(none)</pre>
+          </div>
+        </div>
+
+        <div>
+          <div class="muted" style="margin-bottom:6px">Parsed JSON</div>
+          <pre id="jsonBox">{}</pre>
+        </div>
+      </div>
+      <div class="row no-sep debug-row">
+        <button class="btn secondary" id="toggleDebug" aria-expanded="false">Show debug</button>
+      </div>
+    </div>
+  </div>
+  <script>
+    const CFG = {
+      WORKER: 'https://ai-search.yuri-slimaaa.workers.dev/api/ai-parse',  // your Worker
+      GOOGLE_KEY: 'AIzaSyA_NBG3YRc0qw6CZvKAFaMzT8MYo5mFnR0',                                   
+      BASE_RESULTS: 'https://www.getmyboat.com/boat-rental'
+    };
+  </script>
+
+  <script>
+    // ---- UI helpers ----
+    const $ = (sel) => document.querySelector(sel);
+    const qsBox = $('#qsBox'), jsonBox = $('#jsonBox'), diagBox = $('#diag'), urlInput = $('#finalUrl');
+    const openUrlBtn = $('#openUrl'), copyUrlBtn = $('#copyUrl'), runBtn = $('#run');
+    const RUN_ICON_HTML = runBtn.innerHTML;
+    const promptEl = $('#prompt'); const chipsEl = $('#chips'); const locEl = $('#loc');
+
+    const EXAMPLE_CHIPS = [
+      'Fancy Sunset yacht for 4 with captain',
+      'Family fishing charter this weekend',
+      'Instantly bookable Wakeboard boat no captain',
+      'Fun weekend with my wife and two kids',
+    ];
+
+    let SUGG_LIST = [...EXAMPLE_CHIPS];
+    let currentSugg = [...EXAMPLE_CHIPS];
+    let suggIndex = -1;
+
+    function showSuggest(show){
+      if(show){
+        // match dropdown width to input
+        chipsEl.style.width = `${promptEl.offsetWidth}px`;
+        chipsEl.style.display = 'block';
+      } else {
+        chipsEl.style.display = 'none';
+      }
+    }
+
+    function renderSuggest(list){
+      chipsEl.innerHTML = '';
+      if (!list.length) {
+        const empty = document.createElement('div');
+        empty.className = 'sugg-item muted';
+        empty.setAttribute('aria-disabled','true');
+        empty.style.cursor = 'default';
+        empty.textContent = 'No suggestions';
+        chipsEl.appendChild(empty);
+        showSuggest(true);
+        return;
+      }
+      list.forEach((t,i)=>{
+        const item = document.createElement('div');
+        item.className = 'sugg-item';
+        item.textContent = t;
+        item.dataset.index = String(i);
+        item.onmouseenter = () => { suggIndex = i; updateActive(); };
+        item.onmousedown = (e) => { e.preventDefault(); };
+        item.onclick = () => { promptEl.value = t; showSuggest(false); };
+        chipsEl.appendChild(item);
+      });
+      showSuggest(list.length>0);
+    }
+
+    function filterSuggest(q){
+      const ql = (q||'').toLowerCase().trim();
+      if(!ql){ currentSugg = [...SUGG_LIST]; }
+      else { currentSugg = SUGG_LIST.filter(x=>x.toLowerCase().includes(ql)); }
+      suggIndex = currentSugg.length ? 0 : -1;
+      renderSuggest(currentSugg);
+      updateActive();
+    }
+
+    function updateActive(){
+      const items = Array.from(chipsEl.querySelectorAll('.sugg-item'));
+      items.forEach((el,idx)=> el.classList.toggle('active', idx===suggIndex));
+      if(suggIndex>=0 && items[suggIndex]){
+        const el = items[suggIndex];
+        const boxTop = chipsEl.scrollTop;
+        const boxBottom = boxTop + chipsEl.clientHeight;
+        const elTop = el.offsetTop;
+        const elBottom = elTop + el.offsetHeight;
+        if(elTop < boxTop) chipsEl.scrollTop = elTop;
+        else if(elBottom > boxBottom) chipsEl.scrollTop = elBottom - chipsEl.clientHeight;
+      }
+    }
+
+    function setChips(){
+      // initial render
+      filterSuggest('');
+    }
+
+    // Events: input/blur/focus and keyboard nav
+    promptEl.addEventListener('focus', ()=>{ filterSuggest(promptEl.value); showSuggest(true); });
+    promptEl.addEventListener('input', ()=>{
+      if(chipsEl.style.display === 'block') { filterSuggest(promptEl.value); }
+    });
+    promptEl.addEventListener('click', ()=>{ filterSuggest(promptEl.value); });
+    promptEl.addEventListener('blur', ()=>{ setTimeout(()=>showSuggest(false), 120); });
+
+    promptEl.addEventListener('keydown', (e)=>{
+      if (e.key === 'Enter') {
+        if (chipsEl.style.display === 'block') {
+          if (suggIndex>=0 && currentSugg[suggIndex]) {
+            e.preventDefault();
+            promptEl.value = currentSugg[suggIndex];
+            showSuggest(false);
+          }
+        } else {
+          // Do not auto-run on Enter; search happens only via the CTA
+          e.preventDefault();
+        }
+        return;
+      }
+      if (chipsEl.style.display !== 'block') return;
+      if(e.key==='ArrowDown'){
+        e.preventDefault();
+        if(currentSugg.length){ suggIndex = (suggIndex+1) % currentSugg.length; updateActive(); }
+      } else if(e.key==='ArrowUp'){
+        e.preventDefault();
+        if(currentSugg.length){ suggIndex = (suggIndex-1 + currentSugg.length) % currentSugg.length; updateActive(); }
+      } else if(e.key==='Escape'){
+        showSuggest(false);
+      }
+    });
+
+    // ---- Google Places Autocomplete ----
+    let chosenPlace = null;
+    function initPlaces() {
+      /* global google */
+      const ac = new google.maps.places.Autocomplete(locEl, {
+        fields: ['place_id','geometry','name','formatted_address','address_components'],
+        types: ['(cities)']  // feel free to change to 'geocode' to allow regions/countries
+      });
+      ac.addListener('place_changed', () => {
+        const place = ac.getPlace();
+        chosenPlace = place || null;
+      });
+    }
+
+    // Dynamically load Google Places (simple & robust for local files)
+    (function loadGoogle() {
+      const s = document.createElement('script');
+      s.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(CFG.GOOGLE_KEY)}&libraries=places&callback=__gmb_init`;
+      s.async = true; s.defer = true;
+      window.__gmb_init = () => { initPlaces(); };
+      document.head.appendChild(s);
+    })();
+
+    // ---- Worker call ----
+    async function callWorker(text) {
+      const payload = {
+        text,
+        tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        locale: navigator.language || 'en-US',
+        // Pass a location hint (Worker can ignore or use it)
+        location_hint: (() => {
+          if (!chosenPlace) return null;
+          const vp = chosenPlace.geometry && chosenPlace.geometry.viewport;
+          let swlat=null, swlon=null;
+          try { const sw = vp && vp.getSouthWest(); swlat = sw?.lat(); swlon = sw?.lng(); } catch {}
+          return {
+            description: chosenPlace.formatted_address || chosenPlace.name || null,
+            place_id: chosenPlace.place_id || null,
+            swlat, swlon,
+            // send components for better slugging if you’d like
+            address_components: (chosenPlace.address_components || []).map(c => ({ types: c.types, long_name: c.long_name, short_name: c.short_name }))
+          };
+        })()
+      };
+
+      const t0 = performance.now();
+      try {
+        const res = await fetch(CFG.WORKER, {
+          method: 'POST',
+          headers: { 'content-type':'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const latency = Math.round(performance.now()-t0);
+        const textOut = await res.text();
+        let data = {};
+        try { data = JSON.parse(textOut); } catch { data = {}; }
+
+        return { ok: res.ok, status: res.status, data, raw: textOut, latency };
+      } catch (err) {
+        const latency = Math.round(performance.now()-t0);
+        return { ok: false, status: 0, data: {}, raw: String(err?.message || err), latency };
+      }
+    }
+
+    // ---- URL builder (same rules we’ve been using) ----
+    function buildResultsURL(data) {
+      const slug = (() => {
+        if (typeof data.slug === 'string' && data.slug.trim()) return data.slug.trim();
+        if (Array.isArray(data.slugParts) && data.slugParts.length) return data.slugParts.join('--');
+        return null;
+      })();
+
+      const base = slug ? `${CFG.BASE_RESULTS}/${encodeURIComponent(slug)}` : CFG.BASE_RESULTS;
+      const qs = new URLSearchParams();
+
+      if (Array.isArray(data.dates)) {
+        [...new Set(data.dates)].filter(Boolean).forEach(d => qs.append('dates', d));
+      }
+      // 
+
+      if (data.instabooks === true) qs.set('instabooks','true');
+
+      
+
+      if (typeof data.captain === 'boolean') {
+        if (data.captain) { qs.set('bareboat','false'); qs.set('captained','true'); }
+        else { qs.set('bareboat','true'); qs.set('captained','false'); }
+      }
+
+      const hasMin = Number.isFinite(data.min_price);
+      const hasMax = Number.isFinite(data.max_price);
+      if (hasMin || hasMax) {
+        if (hasMin) qs.set('min_price', String(Math.max(1, Math.trunc(data.min_price))));
+        if (hasMax) qs.set('max_price', String(Math.trunc(data.max_price)));
+        if (!hasMin && hasMax) qs.set('min_price', '1');
+      }
+
+      if (data.superowners === true) qs.set('superowners','true');
+
+      if (Array.isArray(data.categories)) {
+        data.categories.forEach(id => { if (Number.isFinite(id)) qs.append('categories', String(id)); });
+      }
+
+      // If no slug, use the hint coming from Google (place_id + viewport south-west)
+      if (!slug) {
+        if (data.place_id) qs.set('place_id', data.place_id);
+        if (Number.isFinite(data.swlat)) qs.set('swlat', String(data.swlat));
+        if (Number.isFinite(data.swlon)) qs.set('swlon', String(data.swlon));
+      }
+
+      qs.set('page','1');
+      const q = qs.toString().replace(/%2C/g, ',');
+      return q ? `${base}/?${q}` : `${base}/`;
+    }
+
+    // If Worker didn’t fill location but user picked one → graft it in
+    function applyPlaceFallback(workerData) {
+      if (!chosenPlace) return workerData;
+      const out = { ...workerData };
+      const vp = chosenPlace.geometry && chosenPlace.geometry.viewport;
+      if (!out.slug && !out.slugParts) {
+        out.place_id = chosenPlace.place_id || null;
+        try {
+          const sw = vp && vp.getSouthWest();
+          out.swlat = sw?.lat() ?? null;
+          out.swlon = sw?.lng() ?? null;
+        } catch {}
+      }
+      return out;
+    }
+
+    function updatePreview(url, data, diag) {
+      urlInput.value = url;
+      // params view
+      try {
+        const u = new URL(url);
+        const params = Array.from(u.searchParams.entries()).map(([k,v]) => `${k} = ${v}`).join('\n') || '(none)';
+        qsBox.textContent = params;
+      } catch { qsBox.textContent = '(invalid URL)'; }
+      jsonBox.textContent = JSON.stringify(data, null, 2);
+      diagBox.textContent = [
+        `endpoint: ${CFG.WORKER}`,
+        `status: ${diag.status}`,
+        `latency_ms: ${diag.latency}`,
+        `raw: ${diag.raw.slice(0,240).replace(/\s+/g,' ')}`,
+      ].join('\n');
+      openUrlBtn.style.display = 'inline-block';
+    }
+
+    async function run() {
+      openUrlBtn.style.display = 'none';
+      const text = (promptEl.value || '').trim();
+      // Allow empty prompt/location; search only runs on CTA click
+
+      // Open a placeholder tab now (within user gesture) to avoid popup blockers
+      let pendingTab = null;
+      try { pendingTab = window.open('about:blank', '_blank'); } catch {}
+
+      runBtn.disabled = true; runBtn.innerHTML = '…';
+      try {
+        const res = await callWorker(text);
+        if (!res.ok) {
+          // Build a safe fallback URL: base + page=1 (+ chosenPlace params if available)
+          const fallback = applyPlaceFallback({});
+          const finalUrl = buildResultsURL(fallback);
+          updatePreview(finalUrl, fallback, { status: res.status, latency: res.latency, raw: res.raw });
+          // Navigate/open results tab even on error so search always proceeds
+          try {
+            if (pendingTab && !pendingTab.closed) {
+              pendingTab.location.replace(finalUrl);
+              pendingTab.focus();
+            } else {
+              window.open(finalUrl, '_blank');
+            }
+          } catch {
+            window.open(finalUrl, '_blank');
+          }
+          return;
+        }
+        const withPlace = applyPlaceFallback(res.data || {});
+        const finalUrl = buildResultsURL(withPlace);
+        updatePreview(finalUrl, withPlace, { status: res.status, latency: res.latency, raw: res.raw });
+        // Navigate/open the results tab
+        try {
+          if (pendingTab && !pendingTab.closed) {
+            pendingTab.location.replace(finalUrl);
+            pendingTab.focus();
+          } else {
+            window.open(finalUrl, '_blank');
+          }
+        } catch {
+          window.open(finalUrl, '_blank');
+        }
+      } catch (e) {
+        try { if (pendingTab && !pendingTab.closed) pendingTab.close(); } catch {}
+        jsonBox.textContent = JSON.stringify({ error: String(e?.message || e) }, null, 2);
+      } finally {
+      runBtn.disabled = false; runBtn.innerHTML = RUN_ICON_HTML;
+      }
+    }
+
+    // wire UI
+    runBtn.addEventListener('click', run);
+    const toggleBtn = document.getElementById('toggleDebug');
+    if (toggleBtn) {
+      toggleBtn.addEventListener('click', () => {
+        const panel = document.querySelector('.preview');
+        if (!panel) return;
+        const isOpen = panel.classList.toggle('open');
+        toggleBtn.textContent = isOpen ? 'Hide debug' : 'Show debug';
+        toggleBtn.setAttribute('aria-expanded', String(isOpen));
+      });
+    }
+    openUrlBtn.addEventListener('click', () => { const u=urlInput.value; if(u) window.open(u,'_blank'); });
+    copyUrlBtn.addEventListener('click', async () => {
+      try{ await navigator.clipboard.writeText(urlInput.value || ''); copyUrlBtn.textContent='Copied!'; setTimeout(()=>copyUrlBtn.textContent='Copy',900);}catch{}
+    });
+  </script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+# OS / editors
+.DS_Store
+*.log
+
+# Node / Python
+node_modules/
+venv/
+.env
+ENV
+*.venv
+
+# Builds
+dist/
+build/
